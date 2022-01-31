@@ -122,7 +122,7 @@ def sync_traditional_stream(client: MongoClient, stream: Dict, state: Dict):
     common.SCHEMA_TIMES[tap_stream_id] = 0
 
     md_map = metadata.to_map(stream['metadata'])
-    replication_method = metadata.get(md_map, (), 'replication-method')
+    replication_method = stream.get('replication-method', FULL_TABLE_METHOD)
 
     if replication_method not in {INCREMENTAL_METHOD, FULL_TABLE_METHOD}:
         raise InvalidReplicationMethodException(replication_method,
@@ -253,11 +253,11 @@ def get_connection_string(config: Dict):
 
     Returns: A MongoClient connection string
     """
-    srv = config.get('srv') == 'true'
+    srv = config.get('srv')
 
     # Default SSL verify mode to true, give option to disable
-    verify_mode = config.get('verify_mode', 'true') == 'true'
-    use_ssl = config.get('ssl') == 'true'
+    verify_mode = config.get('verify_mode', True)
+    use_ssl = config.get('ssl')
 
     connection_query = {
         'readPreference': 'secondaryPreferred',
@@ -291,7 +291,7 @@ def main_impl():
     """
     args = utils.parse_args(REQUIRED_CONFIG_KEYS)
     config = args.config
-    srv = config.get('srv') == 'true'
+    srv = config.get('srv')
 
     if not srv:
         args = utils.parse_args(REQUIRED_CONFIG_KEYS_NON_SRV)
@@ -305,7 +305,7 @@ def main_impl():
                 client.server_info().get('version', 'unknown'))
 
     common.INCLUDE_SCHEMAS_IN_DESTINATION_STREAM_NAME = \
-        (config.get('include_schemas_in_destination_stream_name') == 'true')
+        (config.get('include_schemas_in_destination_stream_name'))
 
     if args.discover:
         do_discover(client, config)

@@ -181,6 +181,10 @@ def produce_collection_schema(collection: Collection) -> Dict:
         if valid_replication_keys:
             mdata = metadata.write(mdata, (), 'valid-replication-keys', valid_replication_keys)
 
+    mdata = metadata.write(mdata, ('properties', "_id"), 'inclusion', 'automatic')
+    mdata = metadata.write(mdata, ('properties', "document"), 'inclusion', 'automatic')
+    mdata = metadata.write(mdata, ('properties', "_sdc_deleted_at"), 'inclusion', 'automatic')
+
     return {
         'table_name': collection_name,
         'stream': collection_name,
