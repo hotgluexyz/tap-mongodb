@@ -123,7 +123,7 @@ def sync_traditional_stream(client: MongoClient, stream: Dict, state: Dict):
 
     md_map = metadata.to_map(stream['metadata'])
     LOGGER.info(f"Detected metadata={md_map}")
-    replication_method = md_map.get('replication-method', FULL_TABLE_METHOD)
+    replication_method = md_map.get((), dict()).get('replication-method', FULL_TABLE_METHOD)
     LOGGER.info(f"Detected replication_method={replication_method}")
 
     if replication_method not in {INCREMENTAL_METHOD, FULL_TABLE_METHOD}:
