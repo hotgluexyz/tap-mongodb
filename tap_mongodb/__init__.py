@@ -122,8 +122,9 @@ def sync_traditional_stream(client: MongoClient, stream: Dict, state: Dict):
     common.SCHEMA_TIMES[tap_stream_id] = 0
 
     md_map = metadata.to_map(stream['metadata'])
-    replication_method = stream['metadata'].get('replication-method', FULL_TABLE_METHOD)
-    LOGGER.info(f"Detected replication_method={replication_method}.")
+    LOGGER.info(f"Detected metadata={md_map}")
+    replication_method = md_map.get('replication-method', FULL_TABLE_METHOD)
+    LOGGER.info(f"Detected replication_method={replication_method}")
 
     if replication_method not in {INCREMENTAL_METHOD, FULL_TABLE_METHOD}:
         raise InvalidReplicationMethodException(replication_method,
