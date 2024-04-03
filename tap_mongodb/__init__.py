@@ -123,6 +123,7 @@ def sync_traditional_stream(client: MongoClient, stream: Dict, state: Dict):
 
     md_map = metadata.to_map(stream['metadata'])
     replication_method = stream.get('replication-method', FULL_TABLE_METHOD)
+    LOGGER.info(f"Detected replication_method={replication_method}. Stream={stream}")
 
     if replication_method not in {INCREMENTAL_METHOD, FULL_TABLE_METHOD}:
         raise InvalidReplicationMethodException(replication_method,
@@ -323,3 +324,6 @@ def main():
     except Exception as exc:
         LOGGER.exception(exc)
         raise exc
+
+if __name__ == "__main__":
+    main()
