@@ -65,7 +65,7 @@ def do_discover(client: MongoClient, config: Dict):
             continue
 
         LOGGER.info("Getting collection info for db '%s', collection '%s'", database.name, collection_name)
-        streams.append(produce_collection_schema(collection))
+        streams.append(produce_collection_schema(collection, config))
 
     json.dump({'streams': streams}, sys.stdout, indent=2)
 
@@ -106,7 +106,7 @@ def clear_state_on_replication_change(stream: Dict, state: Dict) -> Dict:
     return state
 
 
-def sync_traditional_stream(client: MongoClient, stream: Dict, state: Dict):
+def sync_traditional_stream(client: MongoClient, stream: Dict, state: Dict, config: Dict):
     """
     Sync given stream
     Args:
@@ -149,7 +149,7 @@ def sync_traditional_stream(client: MongoClient, stream: Dict, state: Dict):
         if replication_method == 'FULL_TABLE':
             full_table.sync_collection(collection, stream, state)
         else:
-            incremental.sync_collection(collection, stream, state)
+            incremental.sync_collection(collection, stream, state, config)
 
     state = singer.set_currently_syncing(state, None)
 
@@ -157,7 +157,7 @@ def sync_traditional_stream(client: MongoClient, stream: Dict, state: Dict):
 
 
 
-def sync_traditional_streams(client: MongoClient, traditional_streams: List[Dict], state: Dict):
+def sync_traditional_streams(client: MongoClient, traditional_streams: List[Dict], state: Dict, config: Dict):
     """
     Sync traditional streams that use either FULL_TABLE or INCREMENTAL one stream at a time.
     Args:
@@ -166,7 +166,7 @@ def sync_traditional_streams(client: MongoClient, traditional_streams: List[Dict
         state: state dictionary
     """
     for stream in traditional_streams:
-        sync_traditional_stream(client, stream, state)
+        sync_traditional_stream(client, stream, state, config)
 
 
 def sync_log_based_streams(client: MongoClient,
@@ -231,7 +231,7 @@ def do_sync(client: MongoClient, catalog: Dict, config: Dict, state: Dict):
     log_based_streams, traditional_streams = filter_streams_by_replication_method(streams_to_sync)
 
     LOGGER.debug('Starting sync of traditional streams ...')
-    sync_traditional_streams(client, traditional_streams, state)
+    sync_traditional_streams(client, traditional_streams, state, config)
     LOGGER.debug('Sync of traditional streams done')
 
     LOGGER.debug('Starting sync of log based streams ...')

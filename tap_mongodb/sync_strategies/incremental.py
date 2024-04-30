@@ -43,6 +43,7 @@ def update_bookmark(row: Dict, state: Dict, tap_stream_id: str, replication_key_
 def sync_collection(collection: Collection,
                     stream: Dict,
                     state: Optional[Dict],
+                    config: Optional[Dict]
                     ) -> None:
     """
     Syncs the stream records incrementally
@@ -81,6 +82,7 @@ def sync_collection(collection: Collection,
     stream_state = state.get('bookmarks', {}).get(stream['tap_stream_id'], {})
 
     replication_key_name = metadata.to_map(stream['metadata']).get(()).get('replication-key')
+    start_date = config.get("start_date")
 
     # write state message
     singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
@@ -92,6 +94,10 @@ def sync_collection(collection: Collection,
         find_filter[replication_key_name] = {}
         find_filter[replication_key_name]['$gte'] = common.string_to_class(stream_state.get('replication_key_value'),
                                                                            stream_state.get('replication_key_type'))
+    elif start_date:
+        find_filter[replication_key_name] = {}
+        # TODO: The start date might need to be in a specific format to work
+        find_filter[replication_key_name]['$gte'] = common.string_to_class(start_date, 'datetime')
 
     # log query
     LOGGER.info('Querying %s with: %s', stream['tap_stream_id'], dict(find=find_filter))

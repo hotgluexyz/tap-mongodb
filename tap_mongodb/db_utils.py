@@ -144,7 +144,7 @@ def get_databases(client: MongoClient, config: Dict) -> List[str]:
     return db_names
 
 
-def produce_collection_schema(collection: Collection) -> Dict:
+def produce_collection_schema(collection: Collection, config) -> Dict:
     """
     Generate a schema/catalog from the collection details for discovery mode
     Args:
@@ -177,6 +177,11 @@ def produce_collection_schema(collection: Collection) -> Dict:
                 # index_field_info is a tuple of (field_name, sort_direction)
                 if index_field_info:
                     valid_replication_keys.append(index_field_info[0])
+
+        if config.get("default_replication_key"):
+            valid_replication_keys = [config['default_replication_key']]
+            mdata = metadata.write(mdata, (), 'replication-method', "INCREMENTAL")
+            mdata = metadata.write(mdata, (), 'replication-key', config['default_replication_key'])
 
         if valid_replication_keys:
             mdata = metadata.write(mdata, (), 'valid-replication-keys', valid_replication_keys)
