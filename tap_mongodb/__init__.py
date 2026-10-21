@@ -3,7 +3,7 @@ import copy
 import json
 import sys
 from typing import List, Dict, Optional
-from urllib import parse
+from urllib import parse, request
 
 import singer
 from pymongo import MongoClient
@@ -63,6 +63,44 @@ def require_database(client: MongoClient, config: Dict) -> None:
 
     LOGGER.info('Config is missing required key: database. Available databases: %s', db_names)
     raise Exception(f"Config is missing required key: database. Available databases: {db_names}")
+
+
+def log_public_ipv4() -> None:
+    """Log this host's public IPv4 address for IP-whitelist debugging."""
+    try:
+        with request.urlopen('https://api.ipify.org', timeout=5) as resp:
+            public_ip = resp.read().decode('utf-8').strip()
+        LOGGER.info('Public IPv4 address: %s', public_ip)
+    except Exception as exc:
+        LOGGER.warning('Could not determine public IPv4 address: %s', exc)
+
+
+# Legacy / driver-specific URI options → pymongo-recognized TLS options
+_CONNECTION_STRING_OPTION_ALIASES = {
+    'sslinvalidhostnameallowed': 'tlsAllowInvalidHostnames',
+    'sslinvalidcertificateallowed': 'tlsAllowInvalidCertificates',
+    'sslallowinvalidcertificates': 'tlsAllowInvalidCertificates',
+    'ssl': 'tls',
+}
+
+
+def normalize_connection_string(connection_string: str) -> str:
+    """
+    Rewrite legacy SSL URI options that pymongo ignores (e.g. Studio 3T exports).
+    """
+    parsed = parse.urlparse(connection_string)
+    if not parsed.query:
+        return connection_string
+
+    query = parse.parse_qsl(parsed.query, keep_blank_values=True)
+    normalized = []
+    for key, value in query:
+        canonical = _CONNECTION_STRING_OPTION_ALIASES.get(key.lower(), key)
+        if canonical != key:
+            LOGGER.info('Normalized connection string option %s → %s', key, canonical)
+        normalized.append((canonical, value))
+
+    return parse.urlunparse(parsed._replace(query=parse.urlencode(normalized)))
 
 
 def do_discover(client: MongoClient, config: Dict):
@@ -286,7 +324,7 @@ def get_connection_string(config: Dict):
     Returns: A MongoClient connection string
     """
     if config.get('connection_string'):
-        return config['connection_string']
+        return normalize_connection_string(config['connection_string'])
 
     srv = config.get('srv')
 
@@ -330,6 +368,8 @@ def main_impl():
     args = utils.parse_args([])
     config = args.config
     validate_connection_config(config)
+
+    log_public_ipv4()
 
     connection_string = get_connection_string(config)
     client = MongoClient(connection_string)

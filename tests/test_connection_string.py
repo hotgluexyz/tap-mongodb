@@ -1,7 +1,13 @@
 import unittest
 from unittest.mock import MagicMock, patch
+from urllib import parse
 
-from tap_mongodb import get_connection_string, require_database, validate_connection_config
+from tap_mongodb import (
+    get_connection_string,
+    normalize_connection_string,
+    require_database,
+    validate_connection_config,
+)
 
 
 class TestConnectionString(unittest.TestCase):
@@ -70,8 +76,31 @@ class TestConnectionString(unittest.TestCase):
         self.assertEqual(expected_srv_string, connection_string)
 
     def test_connection_string_config(self):
-        uri = "mongodb://user:pass@host:27017/?ssl=true&authSource=admin"
+        uri = "mongodb://user:pass@host:27017/?authSource=admin&tls=true"
         self.assertEqual(uri, get_connection_string({"connection_string": uri}))
+
+    def test_normalize_connection_string_ssl_aliases(self):
+        uri = (
+            "mongodb://user:pass@host:27017/"
+            "?ssl=true&sslInvalidHostNameAllowed=true&authSource=admin"
+        )
+        params = dict(parse.parse_qsl(parse.urlparse(normalize_connection_string(uri)).query))
+        self.assertEqual(params["tls"], "true")
+        self.assertEqual(params["tlsAllowInvalidHostnames"], "true")
+        self.assertEqual(params["authSource"], "admin")
+        self.assertNotIn("ssl", params)
+        self.assertNotIn("sslInvalidHostNameAllowed", params)
+
+    def test_connection_string_config_normalizes_ssl_aliases(self):
+        uri = (
+            "mongodb://user:pass@host:27017/"
+            "?ssl=true&sslInvalidHostNameAllowed=true&authSource=admin"
+        )
+        params = dict(parse.parse_qsl(
+            parse.urlparse(get_connection_string({"connection_string": uri})).query
+        ))
+        self.assertEqual(params["tls"], "true")
+        self.assertEqual(params["tlsAllowInvalidHostnames"], "true")
 
     def test_validate_connection_config_accepts_connection_string(self):
         validate_connection_config({"connection_string": "mongodb://user:pass@host:27017/"})
