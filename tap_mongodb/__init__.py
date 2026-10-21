@@ -87,6 +87,11 @@ _CONNECTION_STRING_OPTION_ALIASES = {
 def normalize_connection_string(connection_string: str) -> str:
     """
     Rewrite legacy SSL URI options that pymongo ignores (e.g. Studio 3T exports).
+
+    Studio 3T proxy tunnels often include `3t.sniName`. After the initial hello,
+    pymongo would otherwise rediscover Atlas shard hostnames and try to connect
+    to them directly (which times out when only the proxy host is reachable).
+    In that case we strip `3t.*` options and force `directConnection=true`.
     """
     parsed = parse.urlparse(connection_string)
     if not parsed.query:
@@ -94,11 +99,30 @@ def normalize_connection_string(connection_string: str) -> str:
 
     query = parse.parse_qsl(parsed.query, keep_blank_values=True)
     normalized = []
+    studio_3t_proxy = False
+    has_direct_connection = False
+
     for key, value in query:
-        canonical = _CONNECTION_STRING_OPTION_ALIASES.get(key.lower(), key)
+        key_lower = key.lower()
+        if key_lower.startswith('3t.'):
+            studio_3t_proxy = True
+            LOGGER.info('Dropping unsupported Studio 3T connection option: %s', key)
+            continue
+
+        if key_lower == 'directconnection':
+            has_direct_connection = True
+
+        canonical = _CONNECTION_STRING_OPTION_ALIASES.get(key_lower, key)
         if canonical != key:
             LOGGER.info('Normalized connection string option %s → %s', key, canonical)
         normalized.append((canonical, value))
+
+    if studio_3t_proxy and not has_direct_connection:
+        LOGGER.info(
+            'Studio 3T proxy URI detected; setting directConnection=true so the '
+            'driver stays on the seed host instead of Atlas shard hostnames'
+        )
+        normalized.append(('directConnection', 'true'))
 
     return parse.urlunparse(parsed._replace(query=parse.urlencode(normalized)))
 

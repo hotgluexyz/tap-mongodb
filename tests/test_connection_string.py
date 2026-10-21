@@ -102,6 +102,20 @@ class TestConnectionString(unittest.TestCase):
         self.assertEqual(params["tls"], "true")
         self.assertEqual(params["tlsAllowInvalidHostnames"], "true")
 
+    def test_normalize_studio_3t_proxy_forces_direct_connection(self):
+        uri = (
+            "mongodb://user:pass@dw-mongodb-prod.gospringboard.io:27017/"
+            "?ssl=true&sslInvalidHostNameAllowed=true"
+            "&3t.sniName=springboard-datawarehouse-1-shard-00-00-zu4mc.mongodb.net"
+            "&authSource=admin"
+        )
+        params = dict(parse.parse_qsl(parse.urlparse(normalize_connection_string(uri)).query))
+        self.assertEqual(params["tls"], "true")
+        self.assertEqual(params["tlsAllowInvalidHostnames"], "true")
+        self.assertEqual(params["directConnection"], "true")
+        self.assertEqual(params["authSource"], "admin")
+        self.assertTrue(all(not key.lower().startswith("3t.") for key in params))
+
     def test_validate_connection_config_accepts_connection_string(self):
         validate_connection_config({"connection_string": "mongodb://user:pass@host:27017/"})
 
