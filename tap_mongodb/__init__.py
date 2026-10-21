@@ -174,18 +174,32 @@ def do_discover(client: MongoClient, config: Dict):
         config: DB config
     """
     streams = []
+    configured_collections = get_configured_collections(config)
 
-    if config.get('auth_database') and config.get('user'):
+    # Role lookup often returns [] for restricted users (no usersInfo privilege).
+    # Only fail when we resolved a non-empty DB list that excludes the target.
+    # Skip entirely when collections are configured explicitly.
+    if (
+        configured_collections is None
+        and config.get('auth_database')
+        and config.get('user')
+    ):
         try:
-            if config['database'] not in get_databases(client, config):
+            readable_databases = get_databases(client, config)
+            if readable_databases and config['database'] not in readable_databases:
                 raise NoReadPrivilegeException(config['user'], config['database'])
+            if not readable_databases:
+                LOGGER.warning(
+                    'Could not determine readable databases from roles; '
+                    'continuing with configured database %s',
+                    config['database'],
+                )
         except OperationFailure as exc:
             LOGGER.warning(
                 'Skipping role-based database privilege check (not authorized): %s', exc
             )
 
     database = client[config['database']]
-    configured_collections = get_configured_collections(config)
 
     if configured_collections is not None:
         LOGGER.info(
