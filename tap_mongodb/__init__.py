@@ -7,6 +7,7 @@ from urllib import parse, request
 
 import singer
 from pymongo import MongoClient
+from pymongo.errors import OperationFailure
 from singer import metadata, metrics, utils
 
 from tap_mongodb.sync_strategies import change_streams
@@ -49,6 +50,32 @@ def validate_connection_config(config: Dict) -> None:
         raise Exception(f"Config is missing required keys: {missing_keys}")
 
 
+def hydrate_config_from_connection_string(config: Dict) -> None:
+    """Fill user/auth_database from connection_string when not already set."""
+    connection_string = config.get('connection_string')
+    if not connection_string:
+        return
+
+    parsed = parse.urlparse(connection_string)
+    if parsed.username and not config.get('user'):
+        config['user'] = parse.unquote(parsed.username)
+
+    query = dict(parse.parse_qsl(parsed.query, keep_blank_values=True))
+    auth_source = query.get('authSource') or query.get('authsource')
+    if auth_source and not config.get('auth_database'):
+        config['auth_database'] = auth_source
+
+
+def get_configured_collections(config: Dict) -> Optional[List[str]]:
+    """Optional explicit collection list (skips listCollections)."""
+    collections = config.get('collections')
+    if not collections:
+        return None
+    if isinstance(collections, str):
+        return [name.strip() for name in collections.split(',') if name.strip()]
+    return [str(name) for name in collections]
+
+
 def require_database(client: MongoClient, config: Dict) -> None:
     """
     Ensure `database` is set. If missing, log available database names and fail.
@@ -57,11 +84,20 @@ def require_database(client: MongoClient, config: Dict) -> None:
         return
 
     if config.get('auth_database') and config.get('user'):
-        db_names = get_databases(client, config)
+        try:
+            db_names = get_databases(client, config)
+        except OperationFailure as exc:
+            LOGGER.warning('Could not resolve databases from user roles: %s', exc)
+            db_names = [d for d in client.list_database_names() if d not in IGNORE_DBS]
     else:
         db_names = [d for d in client.list_database_names() if d not in IGNORE_DBS]
 
-    LOGGER.info('Config is missing required key: database. Available databases: %s', db_names)
+    LOGGER.info(
+        'Config is missing required key: database. Available databases: %s. '
+        'Note: listDatabases can return names you cannot listCollections on; '
+        'confirm the database name with the data owner, or set collections explicitly.',
+        db_names,
+    )
     raise Exception(f"Config is missing required key: database. Available databases: {db_names}")
 
 
@@ -140,21 +176,45 @@ def do_discover(client: MongoClient, config: Dict):
     streams = []
 
     if config.get('auth_database') and config.get('user'):
-        if config['database'] not in get_databases(client, config):
-            raise NoReadPrivilegeException(config['user'], config['database'])
+        try:
+            if config['database'] not in get_databases(client, config):
+                raise NoReadPrivilegeException(config['user'], config['database'])
+        except OperationFailure as exc:
+            LOGGER.warning(
+                'Skipping role-based database privilege check (not authorized): %s', exc
+            )
 
     database = client[config['database']]
+    configured_collections = get_configured_collections(config)
 
-    collection_names = database.list_collection_names()
+    if configured_collections is not None:
+        LOGGER.info(
+            'Using configured collections (skipping listCollections): %s',
+            configured_collections,
+        )
+        collection_names = configured_collections
+        skip_view_check = True
+    else:
+        try:
+            collection_names = database.list_collection_names()
+        except OperationFailure as exc:
+            if exc.code == 13:
+                raise Exception(
+                    f"Not authorized to listCollections on database '{config['database']}'. "
+                    "Confirm the database name with the data owner, or set config "
+                    "'collections' to the allowed collection names "
+                    "(e.g. \"sb_donation,sb_contact\")."
+                ) from exc
+            raise
+        skip_view_check = False
 
     for collection_name in [c for c in collection_names if not c.startswith("system.")]:
-
         collection = database[collection_name]
-        is_view = collection.options().get('viewOn') is not None
 
-        # Add support for views if needed here
-        if is_view:
-            continue
+        if not skip_view_check:
+            is_view = collection.options().get('viewOn') is not None
+            if is_view:
+                continue
 
         LOGGER.info("Getting collection info for db '%s', collection '%s'", database.name, collection_name)
         streams.append(produce_collection_schema(collection, config))
@@ -392,6 +452,7 @@ def main_impl():
     args = utils.parse_args([])
     config = args.config
     validate_connection_config(config)
+    hydrate_config_from_connection_string(config)
 
     log_public_ipv4()
 

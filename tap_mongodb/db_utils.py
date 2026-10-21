@@ -8,6 +8,7 @@ from typing import Dict, List
 from pymongo import MongoClient
 from pymongo.collection import Collection
 from pymongo.database import Database
+from pymongo.errors import OperationFailure
 from singer import metadata
 
 LOGGER = singer.get_logger('tap_mongodb')
@@ -156,19 +157,30 @@ def produce_collection_schema(collection: Collection, config) -> Dict:
     collection_name = collection.name
     collection_db_name = collection.database.name
 
-    is_view = collection.options().get('viewOn') is not None
+    try:
+        is_view = collection.options().get('viewOn') is not None
+    except OperationFailure:
+        is_view = False
+
+    try:
+        row_count = collection.estimated_document_count()
+    except OperationFailure:
+        row_count = 0
 
     mdata = {}
     mdata = metadata.write(mdata, (), 'table-key-properties', ['_id'])
     mdata = metadata.write(mdata, (), 'database-name', collection_db_name)
-    mdata = metadata.write(mdata, (), 'row-count', collection.estimated_document_count())
+    mdata = metadata.write(mdata, (), 'row-count', row_count)
     mdata = metadata.write(mdata, (), 'is-view', is_view)
 
     # write valid-replication-key metadata by finding fields that have indexes on them.
     # cannot get indexes for views -- NB: This means no key-based incremental for views?
     if not is_view:
         valid_replication_keys = []
-        coll_indexes = collection.index_information()
+        try:
+            coll_indexes = collection.index_information()
+        except OperationFailure:
+            coll_indexes = {}
         # index_information() returns a map of index_name -> index_information
         for _, index_info in coll_indexes.items():
             # we don't support compound indexes

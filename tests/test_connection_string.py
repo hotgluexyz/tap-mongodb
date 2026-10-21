@@ -3,7 +3,9 @@ from unittest.mock import MagicMock, patch
 from urllib import parse
 
 from tap_mongodb import (
+    get_configured_collections,
     get_connection_string,
+    hydrate_config_from_connection_string,
     normalize_connection_string,
     require_database,
     validate_connection_config,
@@ -115,6 +117,21 @@ class TestConnectionString(unittest.TestCase):
         self.assertEqual(params["directConnection"], "true")
         self.assertEqual(params["authSource"], "admin")
         self.assertTrue(all(not key.lower().startswith("3t.") for key in params))
+
+    def test_hydrate_config_from_connection_string(self):
+        config = {
+            "connection_string": "mongodb://hotglue-user:secret@host:27017/?authSource=admin"
+        }
+        hydrate_config_from_connection_string(config)
+        self.assertEqual(config["user"], "hotglue-user")
+        self.assertEqual(config["auth_database"], "admin")
+
+    def test_get_configured_collections(self):
+        self.assertEqual(
+            ["sb_donation", "sb_contact"],
+            get_configured_collections({"collections": "sb_donation, sb_contact"}),
+        )
+        self.assertIsNone(get_configured_collections({}))
 
     def test_validate_connection_config_accepts_connection_string(self):
         validate_connection_config({"connection_string": "mongodb://user:pass@host:27017/"})
