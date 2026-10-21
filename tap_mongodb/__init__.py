@@ -3,10 +3,11 @@ import copy
 import json
 import sys
 from typing import List, Dict, Optional
-from urllib import parse
+from urllib import parse, request
 
 import singer
 from pymongo import MongoClient
+from pymongo.errors import OperationFailure
 from singer import metadata, metrics, utils
 
 from tap_mongodb.sync_strategies import change_streams
@@ -14,7 +15,7 @@ from tap_mongodb.sync_strategies import common
 from tap_mongodb.sync_strategies import full_table
 from tap_mongodb.sync_strategies import incremental
 from tap_mongodb.config_utils import validate_config
-from tap_mongodb.db_utils import get_databases, produce_collection_schema
+from tap_mongodb.db_utils import IGNORE_DBS, get_databases, produce_collection_schema
 from tap_mongodb.errors import InvalidReplicationMethodException, NoReadPrivilegeException
 from tap_mongodb.stream_utils import is_log_based_stream, is_stream_selected, write_schema_message, \
     streams_list_to_dict, filter_streams_by_replication_method, get_streams_to_sync
@@ -26,7 +27,6 @@ REQUIRED_CONFIG_KEYS = [
     'user',
     'password',
     'auth_database',
-    'database'
 ]
 
 REQUIRED_CONFIG_KEYS_NON_SRV = REQUIRED_CONFIG_KEYS + ['port']
@@ -34,6 +34,133 @@ REQUIRED_CONFIG_KEYS_NON_SRV = REQUIRED_CONFIG_KEYS + ['port']
 LOG_BASED_METHOD = 'LOG_BASED'
 INCREMENTAL_METHOD = 'INCREMENTAL'
 FULL_TABLE_METHOD = 'FULL_TABLE'
+
+
+def validate_connection_config(config: Dict) -> None:
+    """
+    Validate that either connection_string or discrete connection params are present.
+    `database` is intentionally optional so available DBs can be listed on failure.
+    """
+    if config.get('connection_string'):
+        return
+
+    required = REQUIRED_CONFIG_KEYS_NON_SRV if not config.get('srv') else REQUIRED_CONFIG_KEYS
+    missing_keys = [key for key in required if key not in config]
+    if missing_keys:
+        raise Exception(f"Config is missing required keys: {missing_keys}")
+
+
+def hydrate_config_from_connection_string(config: Dict) -> None:
+    """Fill user/auth_database from connection_string when not already set."""
+    connection_string = config.get('connection_string')
+    if not connection_string:
+        return
+
+    parsed = parse.urlparse(connection_string)
+    if parsed.username and not config.get('user'):
+        config['user'] = parse.unquote(parsed.username)
+
+    query = dict(parse.parse_qsl(parsed.query, keep_blank_values=True))
+    auth_source = query.get('authSource') or query.get('authsource')
+    if auth_source and not config.get('auth_database'):
+        config['auth_database'] = auth_source
+
+
+def get_configured_collections(config: Dict) -> Optional[List[str]]:
+    """Optional explicit collection list (skips listCollections)."""
+    collections = config.get('collections')
+    if not collections:
+        return None
+    if isinstance(collections, str):
+        return [name.strip() for name in collections.split(',') if name.strip()]
+    return [str(name) for name in collections]
+
+
+def require_database(client: MongoClient, config: Dict) -> None:
+    """
+    Ensure `database` is set. If missing, log available database names and fail.
+    """
+    if config.get('database'):
+        return
+
+    if config.get('auth_database') and config.get('user'):
+        try:
+            db_names = get_databases(client, config)
+        except OperationFailure as exc:
+            LOGGER.warning('Could not resolve databases from user roles: %s', exc)
+            db_names = [d for d in client.list_database_names() if d not in IGNORE_DBS]
+    else:
+        db_names = [d for d in client.list_database_names() if d not in IGNORE_DBS]
+
+    LOGGER.info(
+        'Config is missing required key: database. Available databases: %s. '
+        'Note: listDatabases can return names you cannot listCollections on; '
+        'confirm the database name with the data owner, or set collections explicitly.',
+        db_names,
+    )
+    raise Exception(f"Config is missing required key: database. Available databases: {db_names}")
+
+
+def log_public_ipv4() -> None:
+    """Log this host's public IPv4 address for IP-whitelist debugging."""
+    try:
+        with request.urlopen('https://api.ipify.org', timeout=5) as resp:
+            public_ip = resp.read().decode('utf-8').strip()
+        LOGGER.info('Public IPv4 address: %s', public_ip)
+    except Exception as exc:
+        LOGGER.warning('Could not determine public IPv4 address: %s', exc)
+
+
+# Legacy / driver-specific URI options → pymongo-recognized TLS options
+_CONNECTION_STRING_OPTION_ALIASES = {
+    'sslinvalidhostnameallowed': 'tlsAllowInvalidHostnames',
+    'sslinvalidcertificateallowed': 'tlsAllowInvalidCertificates',
+    'sslallowinvalidcertificates': 'tlsAllowInvalidCertificates',
+    'ssl': 'tls',
+}
+
+
+def normalize_connection_string(connection_string: str) -> str:
+    """
+    Rewrite legacy SSL URI options that pymongo ignores (e.g. Studio 3T exports).
+
+    Studio 3T proxy tunnels often include `3t.sniName`. After the initial hello,
+    pymongo would otherwise rediscover Atlas shard hostnames and try to connect
+    to them directly (which times out when only the proxy host is reachable).
+    In that case we strip `3t.*` options and force `directConnection=true`.
+    """
+    parsed = parse.urlparse(connection_string)
+    if not parsed.query:
+        return connection_string
+
+    query = parse.parse_qsl(parsed.query, keep_blank_values=True)
+    normalized = []
+    studio_3t_proxy = False
+    has_direct_connection = False
+
+    for key, value in query:
+        key_lower = key.lower()
+        if key_lower.startswith('3t.'):
+            studio_3t_proxy = True
+            LOGGER.info('Dropping unsupported Studio 3T connection option: %s', key)
+            continue
+
+        if key_lower == 'directconnection':
+            has_direct_connection = True
+
+        canonical = _CONNECTION_STRING_OPTION_ALIASES.get(key_lower, key)
+        if canonical != key:
+            LOGGER.info('Normalized connection string option %s → %s', key, canonical)
+        normalized.append((canonical, value))
+
+    if studio_3t_proxy and not has_direct_connection:
+        LOGGER.info(
+            'Studio 3T proxy URI detected; setting directConnection=true so the '
+            'driver stays on the seed host instead of Atlas shard hostnames'
+        )
+        normalized.append(('directConnection', 'true'))
+
+    return parse.urlunparse(parsed._replace(query=parse.urlencode(normalized)))
 
 
 def do_discover(client: MongoClient, config: Dict):
@@ -47,22 +174,61 @@ def do_discover(client: MongoClient, config: Dict):
         config: DB config
     """
     streams = []
+    configured_collections = get_configured_collections(config)
 
-    if config['database'] not in get_databases(client, config):
-        raise NoReadPrivilegeException(config['user'], config['database'])
+    # Role lookup often returns [] for restricted users (no usersInfo privilege).
+    # Only fail when we resolved a non-empty DB list that excludes the target.
+    # Skip entirely when collections are configured explicitly.
+    if (
+        configured_collections is None
+        and config.get('auth_database')
+        and config.get('user')
+    ):
+        try:
+            readable_databases = get_databases(client, config)
+            if readable_databases and config['database'] not in readable_databases:
+                raise NoReadPrivilegeException(config['user'], config['database'])
+            if not readable_databases:
+                LOGGER.warning(
+                    'Could not determine readable databases from roles; '
+                    'continuing with configured database %s',
+                    config['database'],
+                )
+        except OperationFailure as exc:
+            LOGGER.warning(
+                'Skipping role-based database privilege check (not authorized): %s', exc
+            )
 
     database = client[config['database']]
 
-    collection_names = database.list_collection_names()
+    if configured_collections is not None:
+        LOGGER.info(
+            'Using configured collections (skipping listCollections): %s',
+            configured_collections,
+        )
+        collection_names = configured_collections
+        skip_view_check = True
+    else:
+        try:
+            collection_names = database.list_collection_names()
+        except OperationFailure as exc:
+            if exc.code == 13:
+                raise Exception(
+                    f"Not authorized to listCollections on database '{config['database']}'. "
+                    "Confirm the database name with the data owner, or set config "
+                    "'collections' to the allowed collection names "
+                    "(e.g. \"sb_donation,sb_contact\")."
+                ) from exc
+            raise
+        skip_view_check = False
 
     for collection_name in [c for c in collection_names if not c.startswith("system.")]:
-
         collection = database[collection_name]
-        is_view = collection.options().get('viewOn') is not None
 
-        # Add support for views if needed here
-        if is_view:
-            continue
+        if not skip_view_check:
+            is_view = collection.options().get('viewOn') is not None
+            if is_view:
+                continue
 
         LOGGER.info("Getting collection info for db '%s', collection '%s'", database.name, collection_name)
         streams.append(produce_collection_schema(collection, config))
@@ -255,10 +421,15 @@ def get_connection_string(config: Dict):
 
     Returns: A MongoClient connection string
     """
+    if config.get('connection_string'):
+        return normalize_connection_string(config['connection_string'])
+
     srv = config.get('srv')
 
     # Default SSL verify mode to true, give option to disable
     verify_mode = config.get('verify_mode', True)
+    if isinstance(verify_mode, str):
+        verify_mode = verify_mode.lower() not in ('false', '0', '')
     use_ssl = config.get('ssl')
 
     connection_query = {
@@ -279,10 +450,11 @@ def get_connection_string(config: Dict):
     query_string = parse.urlencode(connection_query)
 
     port = "" if srv else f":{int(config['port'])}"
+    database = config.get('database', '')
 
     connection_string = f'{"mongodb+srv" if srv else "mongodb"}://{config["user"]}:' \
                         f'{config["password"]}@{config["host"]}' \
-                        f'{port}/{config["database"]}?{query_string}'
+                        f'{port}/{database}?{query_string}'
 
     return connection_string
 
@@ -291,20 +463,21 @@ def main_impl():
     """
     Main function
     """
-    args = utils.parse_args(REQUIRED_CONFIG_KEYS)
+    args = utils.parse_args([])
     config = args.config
-    srv = config.get('srv')
+    validate_connection_config(config)
+    hydrate_config_from_connection_string(config)
 
-    if not srv:
-        args = utils.parse_args(REQUIRED_CONFIG_KEYS_NON_SRV)
-        config = args.config
+    log_public_ipv4()
 
     connection_string = get_connection_string(config)
     client = MongoClient(connection_string)
 
     LOGGER.info('Connected to MongoDB host: %s, version: %s',
-                config['host'],
+                config.get('host', 'connection_string'),
                 client.server_info().get('version', 'unknown'))
+
+    require_database(client, config)
 
     common.INCLUDE_SCHEMAS_IN_DESTINATION_STREAM_NAME = \
         (config.get('include_schemas_in_destination_stream_name'))

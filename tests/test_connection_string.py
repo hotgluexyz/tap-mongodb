@@ -1,6 +1,15 @@
 import unittest
+from unittest.mock import MagicMock, patch
+from urllib import parse
 
-from tap_mongodb import get_connection_string
+from tap_mongodb import (
+    get_configured_collections,
+    get_connection_string,
+    hydrate_config_from_connection_string,
+    normalize_connection_string,
+    require_database,
+    validate_connection_config,
+)
 
 
 class TestConnectionString(unittest.TestCase):
@@ -67,3 +76,97 @@ class TestConnectionString(unittest.TestCase):
         self.config["srv"] = "true"
         connection_string = get_connection_string(self.config)
         self.assertEqual(expected_srv_string, connection_string)
+
+    def test_connection_string_config(self):
+        uri = "mongodb://user:pass@host:27017/?authSource=admin&tls=true"
+        self.assertEqual(uri, get_connection_string({"connection_string": uri}))
+
+    def test_normalize_connection_string_ssl_aliases(self):
+        uri = (
+            "mongodb://user:pass@host:27017/"
+            "?ssl=true&sslInvalidHostNameAllowed=true&authSource=admin"
+        )
+        params = dict(parse.parse_qsl(parse.urlparse(normalize_connection_string(uri)).query))
+        self.assertEqual(params["tls"], "true")
+        self.assertEqual(params["tlsAllowInvalidHostnames"], "true")
+        self.assertEqual(params["authSource"], "admin")
+        self.assertNotIn("ssl", params)
+        self.assertNotIn("sslInvalidHostNameAllowed", params)
+
+    def test_connection_string_config_normalizes_ssl_aliases(self):
+        uri = (
+            "mongodb://user:pass@host:27017/"
+            "?ssl=true&sslInvalidHostNameAllowed=true&authSource=admin"
+        )
+        params = dict(parse.parse_qsl(
+            parse.urlparse(get_connection_string({"connection_string": uri})).query
+        ))
+        self.assertEqual(params["tls"], "true")
+        self.assertEqual(params["tlsAllowInvalidHostnames"], "true")
+
+    def test_normalize_studio_3t_proxy_forces_direct_connection(self):
+        uri = (
+            "mongodb://user:pass@dw-mongodb-prod.gospringboard.io:27017/"
+            "?ssl=true&sslInvalidHostNameAllowed=true"
+            "&3t.sniName=springboard-datawarehouse-1-shard-00-00-zu4mc.mongodb.net"
+            "&authSource=admin"
+        )
+        params = dict(parse.parse_qsl(parse.urlparse(normalize_connection_string(uri)).query))
+        self.assertEqual(params["tls"], "true")
+        self.assertEqual(params["tlsAllowInvalidHostnames"], "true")
+        self.assertEqual(params["directConnection"], "true")
+        self.assertEqual(params["authSource"], "admin")
+        self.assertTrue(all(not key.lower().startswith("3t.") for key in params))
+
+    def test_hydrate_config_from_connection_string(self):
+        config = {
+            "connection_string": "mongodb://hotglue-user:secret@host:27017/?authSource=admin"
+        }
+        hydrate_config_from_connection_string(config)
+        self.assertEqual(config["user"], "hotglue-user")
+        self.assertEqual(config["auth_database"], "admin")
+
+    def test_get_configured_collections(self):
+        self.assertEqual(
+            ["sb_donation", "sb_contact"],
+            get_configured_collections({"collections": "sb_donation, sb_contact"}),
+        )
+        self.assertIsNone(get_configured_collections({}))
+
+    def test_validate_connection_config_accepts_connection_string(self):
+        validate_connection_config({"connection_string": "mongodb://user:pass@host:27017/"})
+
+    def test_validate_connection_config_requires_discrete_params(self):
+        with self.assertRaises(Exception) as ctx:
+            validate_connection_config({"host": "dummy-host"})
+        self.assertIn("missing required keys", str(ctx.exception))
+
+    def test_require_database_passes_when_set(self):
+        require_database(MagicMock(), {"database": "mydb"})
+
+    def test_require_database_lists_and_fails_with_connection_string(self):
+        client = MagicMock()
+        client.list_database_names.return_value = ["admin", "local", "springboard"]
+
+        with self.assertRaises(Exception) as ctx:
+            require_database(client, {"connection_string": "mongodb://u:p@h/"})
+
+        self.assertIn("springboard", str(ctx.exception))
+        self.assertNotIn("local", str(ctx.exception))
+
+    @patch("tap_mongodb.get_databases")
+    def test_require_database_lists_and_fails_with_discrete_params(self, mock_get_databases):
+        mock_get_databases.return_value = ["springboard"]
+        client = MagicMock()
+
+        with self.assertRaises(Exception) as ctx:
+            require_database(client, {
+                "auth_database": "admin",
+                "user": "hotglue-user",
+            })
+
+        self.assertIn("springboard", str(ctx.exception))
+        mock_get_databases.assert_called_once_with(client, {
+            "auth_database": "admin",
+            "user": "hotglue-user",
+        })
