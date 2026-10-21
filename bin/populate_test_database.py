@@ -14,11 +14,11 @@ password = sys.argv[2]
 
 host= '0.0.0.0'
 auth_source = 'reporting'
-ssl = False
+tls = False
 
 
 client = pymongo.MongoClient(host=host, username=username, password=password,
-                             port=27017, authSource=auth_source, ssl=ssl, replicaSet='rs0')
+                             port=27017, authSource=auth_source, tls=tls, replicaSet='rs0')
 
 databases = {
     "simple_db": ["simple_coll_1", "simple_coll_2"],

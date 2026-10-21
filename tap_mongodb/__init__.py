@@ -14,7 +14,7 @@ from tap_mongodb.sync_strategies import common
 from tap_mongodb.sync_strategies import full_table
 from tap_mongodb.sync_strategies import incremental
 from tap_mongodb.config_utils import validate_config
-from tap_mongodb.db_utils import get_databases, produce_collection_schema
+from tap_mongodb.db_utils import IGNORE_DBS, get_databases, produce_collection_schema
 from tap_mongodb.errors import InvalidReplicationMethodException, NoReadPrivilegeException
 from tap_mongodb.stream_utils import is_log_based_stream, is_stream_selected, write_schema_message, \
     streams_list_to_dict, filter_streams_by_replication_method, get_streams_to_sync
@@ -26,7 +26,6 @@ REQUIRED_CONFIG_KEYS = [
     'user',
     'password',
     'auth_database',
-    'database'
 ]
 
 REQUIRED_CONFIG_KEYS_NON_SRV = REQUIRED_CONFIG_KEYS + ['port']
@@ -34,6 +33,36 @@ REQUIRED_CONFIG_KEYS_NON_SRV = REQUIRED_CONFIG_KEYS + ['port']
 LOG_BASED_METHOD = 'LOG_BASED'
 INCREMENTAL_METHOD = 'INCREMENTAL'
 FULL_TABLE_METHOD = 'FULL_TABLE'
+
+
+def validate_connection_config(config: Dict) -> None:
+    """
+    Validate that either connection_string or discrete connection params are present.
+    `database` is intentionally optional so available DBs can be listed on failure.
+    """
+    if config.get('connection_string'):
+        return
+
+    required = REQUIRED_CONFIG_KEYS_NON_SRV if not config.get('srv') else REQUIRED_CONFIG_KEYS
+    missing_keys = [key for key in required if key not in config]
+    if missing_keys:
+        raise Exception(f"Config is missing required keys: {missing_keys}")
+
+
+def require_database(client: MongoClient, config: Dict) -> None:
+    """
+    Ensure `database` is set. If missing, log available database names and fail.
+    """
+    if config.get('database'):
+        return
+
+    if config.get('auth_database') and config.get('user'):
+        db_names = get_databases(client, config)
+    else:
+        db_names = [d for d in client.list_database_names() if d not in IGNORE_DBS]
+
+    LOGGER.info('Config is missing required key: database. Available databases: %s', db_names)
+    raise Exception(f"Config is missing required key: database. Available databases: {db_names}")
 
 
 def do_discover(client: MongoClient, config: Dict):
@@ -48,8 +77,9 @@ def do_discover(client: MongoClient, config: Dict):
     """
     streams = []
 
-    if config['database'] not in get_databases(client, config):
-        raise NoReadPrivilegeException(config['user'], config['database'])
+    if config.get('auth_database') and config.get('user'):
+        if config['database'] not in get_databases(client, config):
+            raise NoReadPrivilegeException(config['user'], config['database'])
 
     database = client[config['database']]
 
@@ -255,10 +285,15 @@ def get_connection_string(config: Dict):
 
     Returns: A MongoClient connection string
     """
+    if config.get('connection_string'):
+        return config['connection_string']
+
     srv = config.get('srv')
 
     # Default SSL verify mode to true, give option to disable
     verify_mode = config.get('verify_mode', True)
+    if isinstance(verify_mode, str):
+        verify_mode = verify_mode.lower() not in ('false', '0', '')
     use_ssl = config.get('ssl')
 
     connection_query = {
@@ -279,10 +314,11 @@ def get_connection_string(config: Dict):
     query_string = parse.urlencode(connection_query)
 
     port = "" if srv else f":{int(config['port'])}"
+    database = config.get('database', '')
 
     connection_string = f'{"mongodb+srv" if srv else "mongodb"}://{config["user"]}:' \
                         f'{config["password"]}@{config["host"]}' \
-                        f'{port}/{config["database"]}?{query_string}'
+                        f'{port}/{database}?{query_string}'
 
     return connection_string
 
@@ -291,20 +327,18 @@ def main_impl():
     """
     Main function
     """
-    args = utils.parse_args(REQUIRED_CONFIG_KEYS)
+    args = utils.parse_args([])
     config = args.config
-    srv = config.get('srv')
-
-    if not srv:
-        args = utils.parse_args(REQUIRED_CONFIG_KEYS_NON_SRV)
-        config = args.config
+    validate_connection_config(config)
 
     connection_string = get_connection_string(config)
     client = MongoClient(connection_string)
 
     LOGGER.info('Connected to MongoDB host: %s, version: %s',
-                config['host'],
+                config.get('host', 'connection_string'),
                 client.server_info().get('version', 'unknown'))
+
+    require_database(client, config)
 
     common.INCLUDE_SCHEMAS_IN_DESTINATION_STREAM_NAME = \
         (config.get('include_schemas_in_destination_stream_name'))
